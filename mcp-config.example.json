@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "emby-collection-creator": {
+      "command": "doppler",
+      "args": [
+        "run",
+        "--",
+        "uv",
+        "run",
+        "--directory",
+        "/path/to/Emby-Collection-Creator",
+        "python",
+        "-m",
+        "emby_collection_creator.mcp.server"
+      ],
+      "env": {
+        "DOPPLER_TOKEN": "your-doppler-service-token"
+      }
+    }
+  }
+}
