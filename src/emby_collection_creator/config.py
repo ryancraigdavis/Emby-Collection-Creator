@@ -14,6 +14,9 @@ class Settings:
     emby_api_key: str
     tmdb_api_key: str
     tmdb_read_access_token: str
+    tastedive_api_key: str
+    trakt_client_id: str
+    trakt_client_secret: str
     claude_api_key: str | None = None
 
 
@@ -25,5 +28,8 @@ def get_settings() -> Settings:
         emby_api_key=os.environ["EMBY_SERVER_API"],
         tmdb_api_key=os.environ["TMDB_API"],
         tmdb_read_access_token=os.environ["TMDB_READ_ACCESS_TOKEN"],
+        tastedive_api_key=os.environ["TASTEDIVE_API"],
+        trakt_client_id=os.environ["TRAKT_TV_CLIENT_ID"],
+        trakt_client_secret=os.environ["TRAKT_TV_CLIENT_SECRET"],
         claude_api_key=os.environ.get("CLAUDE_API"),
     )

@@ -10,6 +10,8 @@ from mcp.types import Tool, TextContent
 from ..config import get_settings
 from ..services.emby import EmbyService
 from ..services.tmdb import TMDbService
+from ..services.tastedive import TasteDiveService
+from ..services.trakt import TraktService
 
 
 CRITERIA_MARKER = "<!-- SYNC_CRITERIA:"
@@ -58,7 +60,7 @@ async def sync_collection_by_criteria(
     criteria: dict,
 ) -> str:
     """Sync a collection based on criteria. Returns a summary string."""
-    movies = await emby.get_movies()
+    movies, _ = await emby.get_movies()
     current_ids = set(await emby.get_collection_items(collection_id))
     matching_ids = set()
 
@@ -145,16 +147,32 @@ def create_mcp_server() -> Server:
         api_key=settings.tmdb_api_key,
         read_access_token=settings.tmdb_read_access_token,
     )
+    tastedive = TasteDiveService(
+        api_key=settings.tastedive_api_key,
+    )
+    trakt = TraktService(
+        client_id=settings.trakt_client_id,
+        client_secret=settings.trakt_client_secret,
+    )
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
         return [
             Tool(
                 name="get_library_movies",
-                description="Get all movies from the Emby library with metadata",
+                description="Get movies from the Emby library with metadata. Supports pagination to avoid truncation with large libraries.",
                 inputSchema={
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "offset": {
+                            "type": "integer",
+                            "description": "Number of items to skip (default 0)",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of items to return (default 100, use smaller values for large libraries)",
+                        },
+                    },
                 },
             ),
             Tool(
@@ -393,24 +411,180 @@ def create_mcp_server() -> Server:
                     "properties": {},
                 },
             ),
+            # TasteDive tools
+            Tool(
+                name="get_similar_movies",
+                description="Get movie recommendations similar to given titles using TasteDive",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "titles": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Movie titles to find similar movies for (e.g., ['The Matrix', 'Blade Runner'])",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of recommendations (default 20)",
+                        },
+                    },
+                    "required": ["titles"],
+                },
+            ),
+            # Trakt tools
+            Tool(
+                name="get_trending_movies",
+                description="Get currently trending movies from Trakt",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results (default 20)",
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="get_popular_movies_trakt",
+                description="Get popular movies from Trakt",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results (default 20)",
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="get_most_watched_movies",
+                description="Get most watched movies from Trakt for a time period",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "period": {
+                            "type": "string",
+                            "enum": ["weekly", "monthly", "yearly", "all"],
+                            "description": "Time period (default: weekly)",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results (default 20)",
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="get_anticipated_movies",
+                description="Get most anticipated upcoming movies from Trakt",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results (default 20)",
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="get_box_office",
+                description="Get current box office movies from Trakt",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="search_trakt_lists",
+                description="Search for public Trakt lists by name",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search term for list names (e.g., 'best horror', 'oscar winners')",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of lists to return (default 10)",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            ),
+            Tool(
+                name="get_trakt_list_items",
+                description="Get movies from a specific Trakt list. Supports pagination to avoid truncation with large lists.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "username": {
+                            "type": "string",
+                            "description": "Trakt username who owns the list",
+                        },
+                        "list_slug": {
+                            "type": "string",
+                            "description": "List slug/ID",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Number of items to skip (default 0)",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of items to return (default 100)",
+                        },
+                    },
+                    "required": ["username", "list_slug"],
+                },
+            ),
+            Tool(
+                name="get_related_movies_trakt",
+                description="Get movies related to a specific movie from Trakt",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "movie_title": {
+                            "type": "string",
+                            "description": "Movie title to find related movies for",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results (default 20)",
+                        },
+                    },
+                    "required": ["movie_title"],
+                },
+            ),
         ]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         try:
             if name == "get_library_movies":
-                movies = await emby.get_movies()
-                result = [
-                    {
-                        "id": m.id,
-                        "name": m.name,
-                        "year": m.year,
-                        "genres": m.genres,
-                        "rating": m.community_rating,
-                        "tmdb_id": m.tmdb_id,
-                    }
-                    for m in movies
-                ]
+                offset = arguments.get("offset", 0)
+                limit = arguments.get("limit", 100)
+                movies, total_count = await emby.get_movies(offset=offset, limit=limit)
+                result = {
+                    "total_count": total_count,
+                    "offset": offset,
+                    "limit": limit,
+                    "returned": len(movies),
+                    "movies": [
+                        {
+                            "id": m.id,
+                            "name": m.name,
+                            "year": m.year,
+                            "genres": m.genres,
+                            "rating": m.community_rating,
+                            "tmdb_id": m.tmdb_id,
+                        }
+                        for m in movies
+                    ],
+                }
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
             elif name == "search_movies":
@@ -439,7 +613,7 @@ def create_mcp_server() -> Server:
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
             elif name == "get_movie_details":
-                movies = await emby.get_movies()
+                movies, _ = await emby.get_movies()
                 movie = next((m for m in movies if m.id == arguments["movie_id"]), None)
                 if not movie:
                     return [TextContent(type="text", text="Movie not found")]
@@ -478,7 +652,7 @@ def create_mcp_server() -> Server:
 
             elif name == "get_collection_items":
                 item_ids = await emby.get_collection_items(arguments["collection_id"])
-                movies = await emby.get_movies()
+                movies, _ = await emby.get_movies()
                 items = [m for m in movies if m.id in item_ids]
                 result = [
                     {"id": m.id, "name": m.name, "year": m.year} for m in items
@@ -644,6 +818,180 @@ def create_mcp_server() -> Server:
                     ]
 
                 return [TextContent(type="text", text="\n\n".join(results))]
+
+            # TasteDive tools
+            elif name == "get_similar_movies":
+                titles = arguments["titles"]
+                limit = arguments.get("limit", 20)
+                response = await tastedive.get_similar(
+                    titles=titles,
+                    media_type="movie",
+                    limit=limit,
+                )
+                result = {
+                    "query": [
+                        {"name": item.name, "type": item.type}
+                        for item in response.query_items
+                    ],
+                    "recommendations": [
+                        {
+                            "name": item.name,
+                            "type": item.type,
+                            "description": item.description,
+                            "wikipedia_url": item.wikipedia_url,
+                        }
+                        for item in response.recommendations
+                    ],
+                }
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+            # Trakt tools
+            elif name == "get_trending_movies":
+                limit = arguments.get("limit", 20)
+                movies = await trakt.get_trending_movies(limit=limit)
+                result = [
+                    {
+                        "title": m.movie.title,
+                        "year": m.movie.year,
+                        "watchers": m.watchers,
+                        "trakt_id": m.movie.trakt_id,
+                        "imdb_id": m.movie.imdb_id,
+                        "tmdb_id": m.movie.tmdb_id,
+                    }
+                    for m in movies
+                ]
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+            elif name == "get_popular_movies_trakt":
+                limit = arguments.get("limit", 20)
+                movies = await trakt.get_popular_movies(limit=limit)
+                result = [
+                    {
+                        "title": m.title,
+                        "year": m.year,
+                        "trakt_id": m.trakt_id,
+                        "imdb_id": m.imdb_id,
+                        "tmdb_id": m.tmdb_id,
+                    }
+                    for m in movies
+                ]
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+            elif name == "get_most_watched_movies":
+                period = arguments.get("period", "weekly")
+                limit = arguments.get("limit", 20)
+                movies = await trakt.get_most_watched_movies(period=period, limit=limit)
+                result = [
+                    {
+                        "title": m.title,
+                        "year": m.year,
+                        "trakt_id": m.trakt_id,
+                        "imdb_id": m.imdb_id,
+                        "tmdb_id": m.tmdb_id,
+                    }
+                    for m in movies
+                ]
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+            elif name == "get_anticipated_movies":
+                limit = arguments.get("limit", 20)
+                movies = await trakt.get_anticipated_movies(limit=limit)
+                result = [
+                    {
+                        "title": m.title,
+                        "year": m.year,
+                        "trakt_id": m.trakt_id,
+                        "imdb_id": m.imdb_id,
+                        "tmdb_id": m.tmdb_id,
+                    }
+                    for m in movies
+                ]
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+            elif name == "get_box_office":
+                movies = await trakt.get_box_office_movies()
+                result = [
+                    {
+                        "title": m.title,
+                        "year": m.year,
+                        "trakt_id": m.trakt_id,
+                        "imdb_id": m.imdb_id,
+                        "tmdb_id": m.tmdb_id,
+                    }
+                    for m in movies
+                ]
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+            elif name == "search_trakt_lists":
+                query = arguments["query"]
+                limit = arguments.get("limit", 10)
+                lists = await trakt.search_lists(query=query, limit=limit)
+                result = [
+                    {
+                        "name": lst.name,
+                        "description": lst.description,
+                        "item_count": lst.item_count,
+                        "likes": lst.likes,
+                        "user": lst.user,
+                        "slug": lst.slug,
+                    }
+                    for lst in lists
+                ]
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+            elif name == "get_trakt_list_items":
+                username = arguments["username"]
+                list_slug = arguments["list_slug"]
+                offset = arguments.get("offset", 0)
+                limit = arguments.get("limit", 100)
+                items, total_count = await trakt.get_list_items(
+                    username=username, list_slug=list_slug, limit=limit, offset=offset
+                )
+                result = {
+                    "total_count": total_count,
+                    "offset": offset,
+                    "limit": limit,
+                    "returned": len(items),
+                    "items": [
+                        {
+                            "rank": item.rank,
+                            "title": item.movie.title,
+                            "year": item.movie.year,
+                            "trakt_id": item.movie.trakt_id,
+                            "imdb_id": item.movie.imdb_id,
+                            "tmdb_id": item.movie.tmdb_id,
+                        }
+                        for item in items
+                    ],
+                }
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+            elif name == "get_related_movies_trakt":
+                movie_title = arguments["movie_title"]
+                limit = arguments.get("limit", 20)
+                # First search for the movie to get its Trakt ID
+                movie = await trakt.search_movie(movie_title)
+                if not movie:
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"Movie '{movie_title}' not found on Trakt",
+                        )
+                    ]
+                related = await trakt.get_related_movies(
+                    trakt_id=movie.trakt_id, limit=limit
+                )
+                result = [
+                    {
+                        "title": m.title,
+                        "year": m.year,
+                        "trakt_id": m.trakt_id,
+                        "imdb_id": m.imdb_id,
+                        "tmdb_id": m.tmdb_id,
+                    }
+                    for m in related
+                ]
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]

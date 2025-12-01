@@ -39,22 +39,34 @@ class EmbyService:
                 return user["Id"]
         return users[0]["Id"]
 
-    async def get_movies(self, user_id: str | None = None) -> list[Movie]:
-        """Fetch all movies from the library."""
+    async def get_movies(
+        self,
+        user_id: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[list[Movie], int]:
+        """Fetch movies from the library with optional pagination.
+
+        Returns tuple of (movies, total_count).
+        """
         if user_id is None:
             user_id = await self.get_user_id()
 
         client = await self._get_client()
-        resp = await client.get(
-            f"/Users/{user_id}/Items",
-            params={
-                "IncludeItemTypes": "Movie",
-                "Recursive": "true",
-                "Fields": "Genres,Tags,Overview,ProviderIds,Studios,CommunityRating,CriticRating,ProductionYear",
-            },
-        )
+        params = {
+            "IncludeItemTypes": "Movie",
+            "Recursive": "true",
+            "Fields": "Genres,Tags,Overview,ProviderIds,Studios,CommunityRating,CriticRating,ProductionYear",
+        }
+        if offset is not None:
+            params["StartIndex"] = offset
+        if limit is not None:
+            params["Limit"] = limit
+
+        resp = await client.get(f"/Users/{user_id}/Items", params=params)
         resp.raise_for_status()
         data = resp.json()
+        total_count = data.get("TotalRecordCount", 0)
 
         movies = []
         for item in data.get("Items", []):
@@ -75,7 +87,7 @@ class EmbyService:
                     studios=[s.get("Name", "") for s in item.get("Studios", [])],
                 )
             )
-        return movies
+        return movies, total_count
 
     async def get_collections(self, user_id: str | None = None) -> list[Collection]:
         """Fetch all collections (BoxSets)."""
@@ -105,10 +117,15 @@ class EmbyService:
             )
         return collections
 
-    async def get_collection(self, collection_id: str) -> dict:
+    async def get_collection(self, collection_id: str, user_id: str | None = None) -> dict:
         """Get full collection item data."""
+        if user_id is None:
+            user_id = await self.get_user_id()
         client = await self._get_client()
-        resp = await client.get(f"/Items/{collection_id}")
+        resp = await client.get(
+            f"/Users/{user_id}/Items/{collection_id}",
+            params={"Fields": "Overview"},
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -119,7 +136,12 @@ class EmbyService:
         client = await self._get_client()
         item_data = await self.get_collection(collection_id)
         item_data["Overview"] = overview
-        resp = await client.post(f"/Items/{collection_id}", json=item_data)
+        # Emby uses POST /Items/{id} for updating item metadata
+        resp = await client.post(
+            f"/Items/{collection_id}",
+            json=item_data,
+            params={"reqformat": "json"},
+        )
         resp.raise_for_status()
 
     async def get_collection_items(
