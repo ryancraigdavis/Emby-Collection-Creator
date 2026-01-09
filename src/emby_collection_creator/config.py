@@ -18,6 +18,9 @@ class Settings:
     trakt_client_id: str
     trakt_client_secret: str
     claude_api_key: str | None = None
+    comfyui_url: str = "http://127.0.0.1:8080"
+    artwork_generated_dir: str = "./artwork/generated"
+    artwork_chosen_dir: str = "./artwork/chosen"
 
 
 @lru_cache

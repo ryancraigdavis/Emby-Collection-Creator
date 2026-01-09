@@ -39,3 +39,6 @@ uv.lock
 CLAUDE.md
 .claude/settings.local.json
 mcp-config.json
+
+# Generated artwork
+artwork/

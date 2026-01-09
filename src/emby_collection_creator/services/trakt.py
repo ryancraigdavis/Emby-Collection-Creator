@@ -55,7 +55,7 @@ class TraktService:
         client = await self._get_client()
         resp = await client.get(
             "/movies/trending",
-            params={"limit": limit, "extended": "full"},
+            params={"limit": limit},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -73,7 +73,7 @@ class TraktService:
         client = await self._get_client()
         resp = await client.get(
             "/movies/popular",
-            params={"limit": limit, "extended": "full"},
+            params={"limit": limit},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -87,7 +87,7 @@ class TraktService:
         client = await self._get_client()
         resp = await client.get(
             f"/movies/watched/{period}",
-            params={"limit": limit, "extended": "full"},
+            params={"limit": limit},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -101,7 +101,7 @@ class TraktService:
         client = await self._get_client()
         resp = await client.get(
             f"/movies/collected/{period}",
-            params={"limit": limit, "extended": "full"},
+            params={"limit": limit},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -113,7 +113,7 @@ class TraktService:
         client = await self._get_client()
         resp = await client.get(
             "/movies/anticipated",
-            params={"limit": limit, "extended": "full"},
+            params={"limit": limit},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -123,7 +123,7 @@ class TraktService:
     async def get_box_office_movies(self) -> list[TraktMovie]:
         """Get current box office movies."""
         client = await self._get_client()
-        resp = await client.get("/movies/boxoffice", params={"extended": "full"})
+        resp = await client.get("/movies/boxoffice")
         resp.raise_for_status()
         data = resp.json()
 
@@ -173,7 +173,7 @@ class TraktService:
 
         resp = await client.get(
             f"/users/{username}/lists/{list_slug}/items/movies",
-            params={"limit": limit, "page": page, "extended": "full"},
+            params={"limit": limit, "page": page},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -201,7 +201,7 @@ class TraktService:
         client = await self._get_client()
         resp = await client.get(
             f"/movies/{trakt_id}/related",
-            params={"limit": limit, "extended": "full"},
+            params={"limit": limit},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -213,7 +213,7 @@ class TraktService:
         client = await self._get_client()
         resp = await client.get(
             "/search/movie",
-            params={"query": query, "limit": 1, "extended": "full"},
+            params={"query": query, "limit": 1},
         )
         resp.raise_for_status()
         data = resp.json()
