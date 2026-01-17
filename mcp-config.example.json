@@ -8,13 +8,13 @@
         "uv",
         "run",
         "--directory",
-        "/path/to/Emby-Collection-Creator",
+        "/home/ryan/projects/Emby-Collection-Creator",
         "python",
         "-m",
         "emby_collection_creator.mcp.server"
       ],
       "env": {
-        "DOPPLER_TOKEN": "your-doppler-service-token"
+        "DOPPLER_TOKEN": "dp.st.xxxx_your_service_token_here"
       }
     }
   }

@@ -445,10 +445,13 @@ class EmbyService:
         content_type: str = "image/png",
     ) -> None:
         """Upload an image for an item (collection, movie, etc)."""
+        import base64
         client = await self._get_client()
+        # Emby expects base64-encoded image data
+        encoded_data = base64.b64encode(image_data)
         resp = await client.post(
             f"/Items/{item_id}/Images/{image_type}",
-            content=image_data,
+            content=encoded_data,
             headers={"Content-Type": content_type},
         )
         resp.raise_for_status()

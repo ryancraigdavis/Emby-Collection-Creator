@@ -1,11 +1,13 @@
 """MCP server implementation for Emby collection management."""
 
 import asyncio
+import io
 import json
 import re
 import shutil
 from pathlib import Path
 
+from PIL import Image
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
@@ -281,6 +283,27 @@ async def sync_collection_by_criteria(
     audio_formats = criteria.get("audio_formats", [])
     require_lossless = criteria.get("require_lossless_audio", False)
 
+    # Check if quality filtering is needed - requires individual fetch for merged versions
+    # Batch fetches only return 1 MediaSource per item, missing merged versions
+    has_quality_filters = bool(
+        resolution or hdr_types or dv_profiles or dv_layer or audio_formats or require_lossless
+    )
+
+    # Concurrency limit for individual fetches
+    semaphore = asyncio.Semaphore(20)
+
+    async def fetch_and_check_quality(movie_id: str) -> str | None:
+        """Fetch full movie and check quality criteria. Returns ID if matches."""
+        async with semaphore:
+            full_movie = await emby.get_movie_by_id(movie_id)
+            if not full_movie:
+                return None
+            if _movie_matches_quality_criteria(
+                full_movie, resolution, hdr_types, dv_profiles, dv_layer, audio_formats, require_lossless
+            ):
+                return movie_id
+            return None
+
     # Process movies in batches
     batch_size = 200
     offset = 0
@@ -290,6 +313,8 @@ async def sync_collection_by_criteria(
         if not movies:
             break
 
+        # First pass: apply non-quality filters
+        candidates = []
         for movie in movies:
             # Genre filter
             if genres:
@@ -314,14 +339,19 @@ async def sync_collection_by_criteria(
                 if not required_tags.issubset(movie_tags):
                     continue
 
-            # Quality filters - check ALL media sources, not just primary
-            if resolution or hdr_types or dv_profiles or dv_layer or audio_formats or require_lossless:
-                if not _movie_matches_quality_criteria(
-                    movie, resolution, hdr_types, dv_profiles, dv_layer, audio_formats, require_lossless
-                ):
-                    continue
+            candidates.append(movie)
 
-            # TMDb-based filters (b-movie score, keywords)
+        # Second pass: quality filters with concurrent fetching
+        if has_quality_filters and candidates:
+            tasks = [fetch_and_check_quality(m.id) for m in candidates]
+            results = await asyncio.gather(*tasks)
+            quality_matched_ids = {r for r in results if r is not None}
+
+            # Filter candidates to only those that matched quality
+            candidates = [m for m in candidates if m.id in quality_matched_ids]
+
+        # Third pass: TMDb-based filters
+        for movie in candidates:
             if min_b_movie_score is not None or required_keywords:
                 if not movie.tmdb_id:
                     continue
@@ -886,29 +916,29 @@ def create_mcp_server() -> Server:
             # Artwork generation tools
             Tool(
                 name="generate_collection_poster",
-                description="Generate AI artwork for a collection poster using Flux Dev. Creates images in the generated folder for review.",
+                description="Generate AI artwork for a collection poster using Flux Dev. Automatically adds the collection title and applies the poster to the collection.",
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "collection_id": {
+                            "type": "string",
+                            "description": "Emby collection ID to generate poster for",
+                        },
                         "prompt": {
                             "type": "string",
                             "description": "Detailed prompt describing the desired poster artwork",
                         },
-                        "collection_name": {
+                        "title": {
                             "type": "string",
-                            "description": "Name of the collection (used for filename)",
-                        },
-                        "count": {
-                            "type": "integer",
-                            "description": "Number of variations to generate (default 1)",
+                            "description": "Title to overlay on the poster (defaults to collection name)",
                         },
                         "width": {
                             "type": "integer",
-                            "description": "Image width in pixels (default 768)",
+                            "description": "Image width in pixels (default 1024)",
                         },
                         "height": {
                             "type": "integer",
-                            "description": "Image height in pixels (default 1152 for poster aspect ratio)",
+                            "description": "Image height in pixels (default 1024)",
                         },
                         "steps": {
                             "type": "integer",
@@ -919,7 +949,7 @@ def create_mcp_server() -> Server:
                             "description": "Guidance scale (default 3.5)",
                         },
                     },
-                    "required": ["prompt", "collection_name"],
+                    "required": ["collection_id", "prompt"],
                 },
             ),
             Tool(
@@ -1067,11 +1097,32 @@ def create_mcp_server() -> Server:
                 require_lossless = arguments.get("require_lossless_audio", False)
                 min_bitrate = arguments.get("min_bitrate")
 
+                # Concurrency limit for individual fetches
+                semaphore = asyncio.Semaphore(20)
+                dv_profiles_list = [dv_profile] if dv_profile is not None else None
+
+                async def fetch_and_check(movie_id: str):
+                    """Fetch full movie and check quality. Returns movie if matches."""
+                    async with semaphore:
+                        full_movie = await emby.get_movie_by_id(movie_id)
+                        if not full_movie:
+                            return None
+
+                        if not _movie_matches_quality_criteria(
+                            full_movie, resolution, hdr_types, dv_profiles_list, dv_layer, audio_formats, require_lossless
+                        ):
+                            return None
+
+                        if min_bitrate and full_movie.media_info and full_movie.media_info.video and full_movie.media_info.video.bitrate:
+                            if full_movie.media_info.video.bitrate < min_bitrate * 1_000_000:
+                                return None
+
+                        return full_movie
+
                 # Fetch in batches to avoid loading entire library at once
                 batch_size = 200
                 filtered = []
                 current_offset = 0
-                total_scanned = 0
 
                 while True:
                     movies, total_count = await emby.get_movies(
@@ -1080,23 +1131,12 @@ def create_mcp_server() -> Server:
                     if not movies:
                         break
 
-                    for m in movies:
-                        # Use helper to check ALL media sources
-                        dv_profiles_list = [dv_profile] if dv_profile is not None else None
-                        if not _movie_matches_quality_criteria(
-                            m, resolution, hdr_types, dv_profiles_list, dv_layer, audio_formats, require_lossless
-                        ):
-                            continue
-
-                        # Check min_bitrate on the primary (best) source
-                        if min_bitrate and m.media_info and m.media_info.video and m.media_info.video.bitrate:
-                            if m.media_info.video.bitrate < min_bitrate * 1_000_000:
-                                continue
-
-                        filtered.append(m)
+                    # Fetch all movies in this batch concurrently
+                    tasks = [fetch_and_check(m.id) for m in movies]
+                    results = await asyncio.gather(*tasks)
+                    filtered.extend([m for m in results if m is not None])
 
                     current_offset += batch_size
-                    total_scanned = current_offset
 
                     # Stop if we have enough results after applying offset
                     if len(filtered) >= offset + limit:
@@ -1146,6 +1186,9 @@ def create_mcp_server() -> Server:
                     "imdb_id": movie.imdb_id,
                     "studios": movie.studios,
                     "media_info": _serialize_media_info(movie.media_info),
+                    "all_media_sources": [
+                        _serialize_media_info(src) for src in movie.all_media_sources
+                    ],
                 }
 
                 if movie.tmdb_id:
@@ -1535,53 +1578,68 @@ def create_mcp_server() -> Server:
                         )
                     ]
 
+                collection_id = arguments["collection_id"]
                 prompt = arguments["prompt"]
-                collection_name = arguments["collection_name"]
-                count = arguments.get("count", 1)
-                width = arguments.get("width", 768)
-                height = arguments.get("height", 1152)
+                width = arguments.get("width", 1024)
+                height = arguments.get("height", 1024)
                 steps = arguments.get("steps", 20)
                 guidance = arguments.get("guidance", 3.5)
 
-                if count == 1:
-                    path = await comfyui.generate_poster(
-                        prompt=prompt,
-                        collection_name=collection_name,
-                        width=width,
-                        height=height,
-                        steps=steps,
-                        guidance=guidance,
+                # Look up collection to get name
+                collections = await emby.get_collections()
+                collection = next(
+                    (c for c in collections if c.id == collection_id), None
+                )
+                if not collection:
+                    return [TextContent(type="text", text="Collection not found")]
+
+                collection_name = collection.name
+                # Empty string = no overlay (use AI-generated text in prompt instead)
+                # None/missing = use collection name as overlay
+                title = arguments.get("title")
+                if title is None:
+                    title = collection_name
+                elif title == "":
+                    title = None  # No overlay
+
+                # Generate poster with title overlay
+                path = await comfyui.generate_poster(
+                    prompt=prompt,
+                    collection_name=collection_name,
+                    width=width,
+                    height=height,
+                    steps=steps,
+                    guidance=guidance,
+                    title=title,
+                )
+
+                # Copy to chosen folder and apply to collection
+                dest_name = f"{collection_name}.png"
+                dest = artwork_chosen / dest_name
+                shutil.copy2(path, dest)
+
+                # Convert to JPEG for Emby (better compatibility)
+                img = Image.open(dest)
+                jpeg_buffer = io.BytesIO()
+                img.convert("RGB").save(jpeg_buffer, "JPEG", quality=95)
+                jpeg_data = jpeg_buffer.getvalue()
+
+                # Apply poster to collection
+                await emby.set_item_image(collection_id, jpeg_data, content_type="image/jpeg")
+
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "collection_id": collection_id,
+                            "collection_name": collection_name,
+                            "title": title,
+                            "image": str(path.absolute()),
+                            "message": f"Generated and applied poster for '{collection_name}'",
+                        }, indent=2),
                     )
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps({
-                                "success": True,
-                                "images": [str(path.absolute())],
-                                "message": f"Generated 1 poster for '{collection_name}'",
-                            }, indent=2),
-                        )
-                    ]
-                else:
-                    paths = await comfyui.generate_multiple(
-                        prompt=prompt,
-                        collection_name=collection_name,
-                        count=count,
-                        width=width,
-                        height=height,
-                        steps=steps,
-                        guidance=guidance,
-                    )
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps({
-                                "success": True,
-                                "images": [str(p.absolute()) for p in paths],
-                                "message": f"Generated {count} posters for '{collection_name}'",
-                            }, indent=2),
-                        )
-                    ]
+                ]
 
             elif name == "list_generated_artwork":
                 collection_filter = arguments.get("collection_filter")
@@ -1683,8 +1741,13 @@ def create_mcp_server() -> Server:
                 if not collection:
                     return [TextContent(type="text", text="Collection not found")]
 
-                image_data = image_path.read_bytes()
-                await emby.set_item_image(collection_id, image_data)
+                # Convert to JPEG for Emby (better compatibility)
+                img = Image.open(image_path)
+                jpeg_buffer = io.BytesIO()
+                img.convert("RGB").save(jpeg_buffer, "JPEG", quality=95)
+                jpeg_data = jpeg_buffer.getvalue()
+
+                await emby.set_item_image(collection_id, jpeg_data, content_type="image/jpeg")
 
                 return [
                     TextContent(
