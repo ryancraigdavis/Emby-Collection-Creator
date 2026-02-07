@@ -1,13 +1,11 @@
 """MCP server implementation for Emby collection management."""
 
 import asyncio
-import io
 import json
 import re
 import shutil
 from pathlib import Path
 
-from PIL import Image
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
@@ -261,10 +259,58 @@ async def sync_collection_by_criteria(
     collection_id: str,
     collection_name: str,
     criteria: dict,
+    trakt: "TraktService | None" = None,
 ) -> str:
     """Sync a collection based on criteria. Returns a summary string."""
     current_ids = set(await emby.get_collection_items(collection_id))
     matching_ids = set()
+
+    # Handle Trakt list-based sync
+    trakt_username = criteria.get("trakt_username")
+    trakt_list_slug = criteria.get("trakt_list_slug")
+    if trakt_username and trakt_list_slug and trakt:
+        # Fetch all Trakt list items (may need pagination for large lists)
+        all_trakt_items = []
+        trakt_offset = 0
+        while True:
+            trakt_items, trakt_total = await trakt.get_list_items(
+                trakt_username, trakt_list_slug, limit=100, offset=trakt_offset
+            )
+            all_trakt_items.extend(trakt_items)
+            trakt_offset += 100
+            if trakt_offset >= trakt_total:
+                break
+
+        # Build a lookup of TMDb IDs from the Trakt list
+        trakt_tmdb_ids = {str(item.movie.tmdb_id) for item in all_trakt_items if item.movie.tmdb_id}
+
+        # Get all movies from Emby and match by TMDb ID
+        batch_size = 200
+        offset = 0
+        while True:
+            movies, total_count = await emby.get_movies(offset=offset, limit=batch_size)
+            if not movies:
+                break
+
+            for movie in movies:
+                if movie.tmdb_id and movie.tmdb_id in trakt_tmdb_ids:
+                    matching_ids.add(movie.id)
+
+            offset += batch_size
+            if offset >= total_count:
+                break
+
+        # Calculate and apply changes (add only, never remove)
+        to_add = matching_ids - current_ids
+
+        if to_add:
+            await emby.add_to_collection(collection_id, list(to_add))
+
+        return (
+            f"Synced '{collection_name}' from Trakt list: "
+            f"{len(matching_ids)} movies match, "
+            f"+{len(to_add)} added"
+        )
 
     genres = criteria.get("genres", [])
     min_year = criteria.get("min_year")
@@ -375,20 +421,17 @@ async def sync_collection_by_criteria(
         if offset >= total_count:
             break
 
-    # Calculate changes
+    # Calculate changes (add only, never remove)
     to_add = matching_ids - current_ids
-    to_remove = current_ids - matching_ids
 
     # Apply changes
     if to_add:
         await emby.add_to_collection(collection_id, list(to_add))
-    if to_remove:
-        await emby.remove_from_collection(collection_id, list(to_remove))
 
     return (
         f"Synced '{collection_name}': "
         f"{len(matching_ids)} movies match, "
-        f"+{len(to_add)} added, -{len(to_remove)} removed"
+        f"+{len(to_add)} added"
     )
 
 
@@ -721,6 +764,14 @@ def create_mcp_server() -> Server:
                             "type": "boolean",
                             "description": "Require lossless audio (TrueHD, DTS-HD MA, FLAC)",
                         },
+                        "trakt_username": {
+                            "type": "string",
+                            "description": "Trakt username for list-based sync",
+                        },
+                        "trakt_list_slug": {
+                            "type": "string",
+                            "description": "Trakt list slug for list-based sync",
+                        },
                         "description": {
                             "type": "string",
                             "description": "Human-readable description of the collection criteria",
@@ -916,7 +967,7 @@ def create_mcp_server() -> Server:
             # Artwork generation tools
             Tool(
                 name="generate_collection_poster",
-                description="Generate AI artwork for a collection poster using Flux Dev. Automatically adds the collection title and applies the poster to the collection.",
+                description="Generate AI artwork for a collection poster using Flux Dev. Include any desired title text in the prompt for the AI to generate.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -926,11 +977,7 @@ def create_mcp_server() -> Server:
                         },
                         "prompt": {
                             "type": "string",
-                            "description": "Detailed prompt describing the desired poster artwork",
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "Title to overlay on the poster (defaults to collection name)",
+                            "description": "Detailed prompt describing the desired poster artwork. Include title text in the prompt if desired.",
                         },
                         "width": {
                             "type": "integer",
@@ -1354,7 +1401,7 @@ def create_mcp_server() -> Server:
                     ]
 
                 result = await sync_collection_by_criteria(
-                    emby, tmdb, collection_id, collection.name, criteria
+                    emby, tmdb, collection_id, collection.name, criteria, trakt
                 )
                 return [TextContent(type="text", text=result)]
 
@@ -1366,7 +1413,7 @@ def create_mcp_server() -> Server:
                     criteria = decode_criteria(collection.overview)
                     if criteria:
                         result = await sync_collection_by_criteria(
-                            emby, tmdb, collection.id, collection.name, criteria
+                            emby, tmdb, collection.id, collection.name, criteria, trakt
                         )
                         results.append(result)
 
@@ -1594,15 +1641,8 @@ def create_mcp_server() -> Server:
                     return [TextContent(type="text", text="Collection not found")]
 
                 collection_name = collection.name
-                # Empty string = no overlay (use AI-generated text in prompt instead)
-                # None/missing = use collection name as overlay
-                title = arguments.get("title")
-                if title is None:
-                    title = collection_name
-                elif title == "":
-                    title = None  # No overlay
 
-                # Generate poster with title overlay
+                # Generate poster
                 path = await comfyui.generate_poster(
                     prompt=prompt,
                     collection_name=collection_name,
@@ -1610,7 +1650,6 @@ def create_mcp_server() -> Server:
                     height=height,
                     steps=steps,
                     guidance=guidance,
-                    title=title,
                 )
 
                 # Copy to chosen folder and apply to collection
@@ -1618,14 +1657,9 @@ def create_mcp_server() -> Server:
                 dest = artwork_chosen / dest_name
                 shutil.copy2(path, dest)
 
-                # Convert to JPEG for Emby (better compatibility)
-                img = Image.open(dest)
-                jpeg_buffer = io.BytesIO()
-                img.convert("RGB").save(jpeg_buffer, "JPEG", quality=95)
-                jpeg_data = jpeg_buffer.getvalue()
-
-                # Apply poster to collection
-                await emby.set_item_image(collection_id, jpeg_data, content_type="image/jpeg")
+                # Read PNG and apply to collection
+                png_data = dest.read_bytes()
+                await emby.set_item_image(collection_id, png_data, content_type="image/png")
 
                 return [
                     TextContent(
@@ -1634,7 +1668,6 @@ def create_mcp_server() -> Server:
                             "success": True,
                             "collection_id": collection_id,
                             "collection_name": collection_name,
-                            "title": title,
                             "image": str(path.absolute()),
                             "message": f"Generated and applied poster for '{collection_name}'",
                         }, indent=2),

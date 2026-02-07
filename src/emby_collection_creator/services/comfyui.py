@@ -7,7 +7,6 @@ from pathlib import Path
 
 import httpx
 from attrs import define, field
-from PIL import Image, ImageDraw, ImageFont
 
 
 @define
@@ -42,63 +41,6 @@ class ComfyUIService:
             return resp.status_code == 200
         except httpx.ConnectError:
             return False
-
-    def add_title_overlay(self, image_path: Path, title: str) -> None:
-        """Add a title overlay to the bottom of an image."""
-        img = Image.open(image_path)
-        draw = ImageDraw.Draw(img)
-
-        # Calculate font size based on image width (roughly 1/12th of width)
-        target_font_size = img.width // 12
-        font = None
-
-        # Try to load a nice font, fall back to default
-        font_paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-            "C:\\Windows\\Fonts\\arial.ttf",
-        ]
-        for font_path in font_paths:
-            try:
-                font = ImageFont.truetype(font_path, target_font_size)
-                break
-            except (OSError, IOError):
-                continue
-
-        if font is None:
-            font = ImageFont.load_default()
-
-        # Get text bounding box
-        bbox = draw.textbbox((0, 0), title, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-
-        # Position text at bottom center with padding
-        padding = 40
-        x = (img.width - text_width) // 2
-        y = img.height - text_height - padding
-
-        # Draw semi-transparent background bar
-        bar_padding = 20
-        bar_top = y - bar_padding
-        bar_bottom = img.height
-        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        overlay_draw = ImageDraw.Draw(overlay)
-        overlay_draw.rectangle(
-            [(0, bar_top), (img.width, bar_bottom)],
-            fill=(0, 0, 0, 180),
-        )
-        img = Image.alpha_composite(img.convert("RGBA"), overlay)
-
-        # Draw text with shadow for depth
-        draw = ImageDraw.Draw(img)
-        shadow_offset = 3
-        draw.text((x + shadow_offset, y + shadow_offset), title, font=font, fill=(0, 0, 0, 200))
-        draw.text((x, y), title, font=font, fill=(255, 255, 255, 255))
-
-        # Save back
-        img.convert("RGB").save(image_path, "PNG")
 
     async def queue_prompt(self, workflow: dict) -> str:
         """Queue a workflow and return the prompt ID."""
@@ -232,7 +174,6 @@ class ComfyUIService:
         steps: int = 20,
         guidance: float = 3.5,
         seed: int | None = None,
-        title: str | None = None,
     ) -> Path:
         """Generate a poster and save it locally."""
         workflow = self.build_flux_workflow(
@@ -262,10 +203,6 @@ class ComfyUIService:
                 local_filename = f"{safe_name}_{prompt_id[:8]}.png"
                 local_path = self.output_dir / local_filename
                 local_path.write_bytes(image_data)
-
-                # Add title overlay if provided
-                if title:
-                    self.add_title_overlay(local_path, title)
 
                 return local_path
 
