@@ -102,6 +102,7 @@ class Movie:
     imdb_id: str | None = None
     production_year: int | None = None
     studios: list[str] = field(factory=list)
+    official_rating: str | None = None
     media_info: MediaInfo | None = None
     all_media_sources: list[MediaInfo] = field(factory=list)
 

@@ -313,12 +313,15 @@ async def sync_collection_by_criteria(
         )
 
     genres = criteria.get("genres", [])
+    studios = [s.lower() for s in criteria.get("studios", [])]
+    content_ratings = [r.upper() for r in criteria.get("content_ratings", [])]
     min_year = criteria.get("min_year")
     max_year = criteria.get("max_year")
     min_rating = criteria.get("min_rating")
     max_rating = criteria.get("max_rating")
     min_b_movie_score = criteria.get("min_b_movie_score")
     required_tags = set(t.lower() for t in criteria.get("tags", []))
+    exclude_tags = set(t.lower() for t in criteria.get("exclude_tags", []))
     required_keywords = set(k.lower() for k in criteria.get("keywords", []))
 
     # Quality filters
@@ -367,6 +370,17 @@ async def sync_collection_by_criteria(
                 if not any(g in movie.genres for g in genres):
                     continue
 
+            # Studio filter
+            if studios:
+                movie_studios = [s.lower() for s in movie.studios]
+                if not any(s in movie_studios for s in studios):
+                    continue
+
+            # Content rating filter
+            if content_ratings:
+                if not movie.official_rating or movie.official_rating.upper() not in content_ratings:
+                    continue
+
             # Year filter
             if min_year and (not movie.year or movie.year < min_year):
                 continue
@@ -380,9 +394,12 @@ async def sync_collection_by_criteria(
                 continue
 
             # Tag filter
+            movie_tags = set(t.lower() for t in movie.tags)
             if required_tags:
-                movie_tags = set(t.lower() for t in movie.tags)
                 if not required_tags.issubset(movie_tags):
+                    continue
+            if exclude_tags:
+                if exclude_tags.intersection(movie_tags):
                     continue
 
             candidates.append(movie)
@@ -705,6 +722,16 @@ def create_mcp_server() -> Server:
                             "items": {"type": "string"},
                             "description": "Required genres (e.g., ['Horror'])",
                         },
+                        "studios": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Required studios (e.g., ['A24', 'Universal Pictures'])",
+                        },
+                        "content_ratings": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Required content/parental ratings (e.g., ['G', 'PG', 'PG-13', 'R'])",
+                        },
                         "min_year": {
                             "type": "integer",
                             "description": "Minimum production year",
@@ -729,6 +756,11 @@ def create_mcp_server() -> Server:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Required tags in Emby",
+                        },
+                        "exclude_tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Exclude movies with these tags (e.g., ['PG-13+'])",
                         },
                         "keywords": {
                             "type": "array",
@@ -1774,13 +1806,9 @@ def create_mcp_server() -> Server:
                 if not collection:
                     return [TextContent(type="text", text="Collection not found")]
 
-                # Convert to JPEG for Emby (better compatibility)
-                img = Image.open(image_path)
-                jpeg_buffer = io.BytesIO()
-                img.convert("RGB").save(jpeg_buffer, "JPEG", quality=95)
-                jpeg_data = jpeg_buffer.getvalue()
-
-                await emby.set_item_image(collection_id, jpeg_data, content_type="image/jpeg")
+                image_data = image_path.read_bytes()
+                content_type = "image/png" if filename.lower().endswith(".png") else "image/jpeg"
+                await emby.set_item_image(collection_id, image_data, content_type=content_type)
 
                 return [
                     TextContent(

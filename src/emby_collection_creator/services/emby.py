@@ -10,7 +10,7 @@ from ..models.emby import AudioStream, MediaInfo, Movie, MovieSummary, Collectio
 MINIMAL_FIELDS = "Genres,Tags,ProviderIds,CommunityRating,ProductionYear"
 
 # Full fields for detailed views
-FULL_FIELDS = "Genres,Tags,Overview,ProviderIds,Studios,CommunityRating,CriticRating,ProductionYear,MediaSources"
+FULL_FIELDS = "Genres,Tags,Overview,ProviderIds,Studios,CommunityRating,CriticRating,ProductionYear,MediaSources,OfficialRating"
 
 
 def _parse_video_stream(stream: dict) -> VideoStream:
@@ -261,6 +261,7 @@ class EmbyService:
             imdb_id=provider_ids.get("Imdb"),
             production_year=item.get("ProductionYear"),
             studios=[s.get("Name", "") for s in item.get("Studios", [])],
+            official_rating=item.get("OfficialRating"),
             media_info=_parse_media_info(item),
             all_media_sources=_parse_all_media_sources(item),
         )
@@ -311,6 +312,7 @@ class EmbyService:
                     imdb_id=provider_ids.get("Imdb"),
                     production_year=item.get("ProductionYear"),
                     studios=[s.get("Name", "") for s in item.get("Studios", [])],
+                    official_rating=item.get("OfficialRating"),
                     media_info=_parse_media_info(item),
                     all_media_sources=_parse_all_media_sources(item),
                 )
@@ -412,13 +414,16 @@ class EmbyService:
     async def add_to_collection(
         self, collection_id: str, item_ids: list[str]
     ) -> None:
-        """Add items to an existing collection."""
+        """Add items to an existing collection in batches."""
         client = await self._get_client()
-        resp = await client.post(
-            f"/Collections/{collection_id}/Items",
-            params={"Ids": ",".join(item_ids)},
-        )
-        resp.raise_for_status()
+        batch_size = 50
+        for i in range(0, len(item_ids), batch_size):
+            batch = item_ids[i : i + batch_size]
+            resp = await client.post(
+                f"/Collections/{collection_id}/Items",
+                params={"Ids": ",".join(batch)},
+            )
+            resp.raise_for_status()
 
     async def remove_from_collection(
         self, collection_id: str, item_ids: list[str]
@@ -524,6 +529,7 @@ class EmbyService:
                         imdb_id=provider_ids.get("Imdb"),
                         production_year=item.get("ProductionYear"),
                         studios=[s.get("Name", "") for s in item.get("Studios", [])],
+                        official_rating=item.get("OfficialRating"),
                         media_info=_parse_media_info(item),
                         all_media_sources=_parse_all_media_sources(item),
                     )
@@ -584,6 +590,7 @@ class EmbyService:
                         imdb_id=provider_ids.get("Imdb"),
                         production_year=item.get("ProductionYear"),
                         studios=[s.get("Name", "") for s in item.get("Studios", [])],
+                        official_rating=item.get("OfficialRating"),
                         media_info=_parse_media_info(item),
                         all_media_sources=_parse_all_media_sources(item),
                     )
