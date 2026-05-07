@@ -1,5 +1,7 @@
 """Trakt.tv API service for trending, popular, and list data."""
 
+import asyncio
+
 import httpx
 from attrs import define
 
@@ -18,6 +20,7 @@ class TraktService:
 
     client_id: str
     client_secret: str
+    access_token: str | None = None
     _client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -221,3 +224,118 @@ class TraktService:
         if data:
             return self._parse_movie(data[0].get("movie", {}))
         return None
+
+    async def get_device_code(self) -> dict:
+        """Start OAuth device code flow. Returns device_code, user_code, verification_url."""
+        client = await self._get_client()
+        resp = await client.post(
+            "/oauth/device/code",
+            json={"client_id": self.client_id},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def poll_device_token(
+        self, device_code: str, interval: int = 5, timeout: int = 120
+    ) -> dict | None:
+        """Poll for device token after user authorization. Returns token data or None."""
+        client = await self._get_client()
+        elapsed = 0
+        while elapsed < timeout:
+            resp = await client.post(
+                "/oauth/device/token",
+                json={
+                    "code": device_code,
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                self.access_token = data["access_token"]
+                return data
+            if resp.status_code == 400:
+                await asyncio.sleep(interval)
+                elapsed += interval
+                continue
+            if resp.status_code == 429:
+                await asyncio.sleep(interval * 2)
+                elapsed += interval * 2
+                continue
+            return None
+        return None
+
+    def _auth_headers(self) -> dict:
+        if not self.access_token:
+            raise ValueError("Trakt authentication required. Use trakt_start_auth first.")
+        return {"Authorization": f"Bearer {self.access_token}"}
+
+    async def create_list(
+        self, name: str, description: str = "", privacy: str = "public"
+    ) -> dict:
+        """Create a new list on the authenticated user's account."""
+        client = await self._get_client()
+        resp = await client.post(
+            "/users/me/lists",
+            json={
+                "name": name,
+                "description": description,
+                "privacy": privacy,
+                "display_numbers": True,
+                "allow_comments": True,
+                "sort_by": "rank",
+                "sort_how": "asc",
+            },
+            headers=self._auth_headers(),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def add_items_to_list(
+        self, username: str, list_slug: str, imdb_ids: list[str]
+    ) -> dict:
+        """Add items to a list by IMDb IDs. Tries movies first, then shows for unmatched."""
+        client = await self._get_client()
+        headers = self._auth_headers()
+
+        total_movies = 0
+        total_shows = 0
+        all_not_found: list[str] = []
+
+        for i in range(0, len(imdb_ids), 100):
+            batch = imdb_ids[i : i + 100]
+
+            resp = await client.post(
+                f"/users/{username}/lists/{list_slug}/items",
+                json={"movies": [{"ids": {"imdb": iid}} for iid in batch]},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            total_movies += result.get("added", {}).get("movies", 0)
+
+            not_found = result.get("not_found", {}).get("movies", [])
+            not_found_ids = [
+                m["ids"]["imdb"] for m in not_found if m.get("ids", {}).get("imdb")
+            ]
+
+            if not_found_ids:
+                resp2 = await client.post(
+                    f"/users/{username}/lists/{list_slug}/items",
+                    json={"shows": [{"ids": {"imdb": iid}} for iid in not_found_ids]},
+                    headers=headers,
+                )
+                resp2.raise_for_status()
+                result2 = resp2.json()
+                total_shows += result2.get("added", {}).get("shows", 0)
+                all_not_found.extend(
+                    s["ids"]["imdb"]
+                    for s in result2.get("not_found", {}).get("shows", [])
+                    if s.get("ids", {}).get("imdb")
+                )
+
+        return {
+            "movies_added": total_movies,
+            "shows_added": total_shows,
+            "not_found": all_not_found,
+        }

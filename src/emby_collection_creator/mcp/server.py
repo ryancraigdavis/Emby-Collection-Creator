@@ -477,6 +477,7 @@ def create_mcp_server() -> Server:
     trakt = TraktService(
         client_id=settings.trakt_client_id,
         client_secret=settings.trakt_client_secret,
+        access_token=settings.trakt_access_token,
     )
     comfyui = ComfyUIService(
         base_url=settings.comfyui_url,
@@ -935,6 +936,24 @@ def create_mcp_server() -> Server:
                 },
             ),
             Tool(
+                name="get_top_box_office_by_year",
+                description="Get top box office movies for a specific year using TMDb revenue data",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "year": {
+                            "type": "integer",
+                            "description": "The year to get top box office movies for",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of top movies to return (default 5)",
+                        },
+                    },
+                    "required": ["year"],
+                },
+            ),
+            Tool(
                 name="search_trakt_lists",
                 description="Search for public Trakt lists by name",
                 inputSchema={
@@ -994,6 +1013,75 @@ def create_mcp_server() -> Server:
                         },
                     },
                     "required": ["movie_title"],
+                },
+            ),
+            # Trakt write tools
+            Tool(
+                name="trakt_start_auth",
+                description="Start Trakt OAuth device authentication. Returns a user code and URL for the user to authorize.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="trakt_complete_auth",
+                description="Complete Trakt OAuth authentication after user has authorized. Polls for up to 120 seconds.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "device_code": {
+                            "type": "string",
+                            "description": "Device code from trakt_start_auth",
+                        },
+                    },
+                    "required": ["device_code"],
+                },
+            ),
+            Tool(
+                name="create_trakt_list",
+                description="Create a new list on the authenticated Trakt user's account",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "List name",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "List description",
+                        },
+                        "privacy": {
+                            "type": "string",
+                            "enum": ["public", "friends", "private"],
+                            "description": "List privacy (default: public)",
+                        },
+                    },
+                    "required": ["name"],
+                },
+            ),
+            Tool(
+                name="add_to_trakt_list",
+                description="Add movies/shows to a Trakt list by IMDb IDs. Automatically detects movies vs shows.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "username": {
+                            "type": "string",
+                            "description": "Trakt username who owns the list",
+                        },
+                        "list_slug": {
+                            "type": "string",
+                            "description": "List slug",
+                        },
+                        "imdb_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of IMDb IDs (e.g., ['tt0111161', 'tt0068646'])",
+                        },
+                    },
+                    "required": ["username", "list_slug", "imdb_ids"],
                 },
             ),
             # Artwork generation tools
@@ -1562,6 +1650,17 @@ def create_mcp_server() -> Server:
                 ]
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
+            elif name == "get_top_box_office_by_year":
+                year = arguments["year"]
+                limit = arguments.get("limit", 5)
+                movies = await tmdb.discover_movies(
+                    year_gte=year,
+                    year_lte=year,
+                    sort_by="revenue.desc",
+                    limit=limit,
+                )
+                return [TextContent(type="text", text=json.dumps(movies, indent=2))]
+
             elif name == "search_trakt_lists":
                 query = arguments["query"]
                 limit = arguments.get("limit", 10)
@@ -1632,6 +1731,75 @@ def create_mcp_server() -> Server:
                     for m in related
                 ]
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+            # Trakt write tools
+            elif name == "trakt_start_auth":
+                data = await trakt.get_device_code()
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "user_code": data["user_code"],
+                            "verification_url": data["verification_url"],
+                            "device_code": data["device_code"],
+                            "expires_in": data["expires_in"],
+                            "interval": data["interval"],
+                        }, indent=2),
+                    )
+                ]
+
+            elif name == "trakt_complete_auth":
+                device_code = arguments["device_code"]
+                token_data = await trakt.poll_device_token(device_code)
+                if token_data:
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": True,
+                                "access_token": token_data["access_token"],
+                                "message": "Add this as TRAKT_ACCESS_TOKEN in Doppler, then restart the MCP server.",
+                            }, indent=2),
+                        )
+                    ]
+                return [
+                    TextContent(
+                        type="text",
+                        text="Authentication failed or timed out. Please try again.",
+                    )
+                ]
+
+            elif name == "create_trakt_list":
+                list_name = arguments["name"]
+                description = arguments.get("description", "")
+                privacy = arguments.get("privacy", "public")
+                data = await trakt.create_list(list_name, description, privacy)
+                ids = data.get("ids", {})
+                user = data.get("user", {})
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "name": data.get("name"),
+                            "slug": ids.get("slug"),
+                            "username": user.get("username"),
+                            "privacy": data.get("privacy"),
+                            "trakt_id": ids.get("trakt"),
+                        }, indent=2),
+                    )
+                ]
+
+            elif name == "add_to_trakt_list":
+                username = arguments["username"]
+                list_slug = arguments["list_slug"]
+                imdb_ids = arguments["imdb_ids"]
+                result = await trakt.add_items_to_list(username, list_slug, imdb_ids)
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2),
+                    )
+                ]
 
             # Artwork generation tools
             elif name == "check_comfyui_status":

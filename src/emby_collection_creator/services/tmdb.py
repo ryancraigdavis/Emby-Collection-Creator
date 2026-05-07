@@ -115,10 +115,12 @@ class TMDbService:
         min_vote_average: float | None = None,
         year_gte: int | None = None,
         year_lte: int | None = None,
-    ) -> list[int]:
-        """Discover movies matching criteria, returns TMDb IDs."""
+        sort_by: str = "popularity.desc",
+        limit: int = 20,
+    ) -> list[dict]:
+        """Discover movies matching criteria, returns list of movie dicts."""
         client = await self._get_client()
-        params = {}
+        params = {"sort_by": sort_by}
 
         if genres:
             params["with_genres"] = ",".join(str(g) for g in genres)
@@ -133,11 +135,28 @@ class TMDbService:
         if year_lte:
             params["primary_release_date.lte"] = f"{year_lte}-12-31"
 
-        resp = await client.get("/discover/movie", params=params)
-        resp.raise_for_status()
-        data = resp.json()
+        results = []
+        page = 1
+        while len(results) < limit:
+            params["page"] = page
+            resp = await client.get("/discover/movie", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            page_results = data.get("results", [])
+            if not page_results:
+                break
+            results.extend(page_results)
+            page += 1
 
-        return [movie["id"] for movie in data.get("results", [])]
+        return [
+            {
+                "tmdb_id": m["id"],
+                "title": m.get("title", ""),
+                "release_date": m.get("release_date"),
+                "revenue": m.get("revenue"),
+            }
+            for m in results[:limit]
+        ]
 
     def is_b_movie_studio(self, companies: list[str]) -> bool:
         """Check if any production company is a known b-movie studio."""
