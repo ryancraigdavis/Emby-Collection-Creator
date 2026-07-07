@@ -17,6 +17,7 @@ class Settings:
     tastedive_api_key: str
     trakt_client_id: str
     trakt_client_secret: str
+    tmdb_user_access_token: str | None = None
     trakt_access_token: str | None = None
     claude_api_key: str | None = None
     comfyui_url: str = "http://127.0.0.1:8188"
@@ -35,6 +36,7 @@ def get_settings() -> Settings:
         tastedive_api_key=os.environ["TASTEDIVE_API"],
         trakt_client_id=os.environ["TRAKT_TV_CLIENT_ID"],
         trakt_client_secret=os.environ["TRAKT_TV_CLIENT_SECRET"],
+        tmdb_user_access_token=os.environ.get("TMDB_USER_ACCESS_TOKEN"),
         trakt_access_token=os.environ.get("TRAKT_ACCESS_TOKEN"),
         claude_api_key=os.environ.get("CLAUDE_API"),
     )

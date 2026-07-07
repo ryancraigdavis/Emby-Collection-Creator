@@ -40,6 +40,7 @@ class TMDbService:
 
     api_key: str
     read_access_token: str
+    user_access_token: str | None = None
     _client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -157,6 +158,96 @@ class TMDbService:
             }
             for m in results[:limit]
         ]
+
+    async def get_list_movie_ids(self, list_id: str) -> set[str]:
+        """Fetch all movie TMDb IDs from a public TMDb (v4) list."""
+        client = await self._get_client()
+        tmdb_ids: set[str] = set()
+        page = 1
+        while True:
+            resp = await client.get(
+                f"https://api.themoviedb.org/4/list/{list_id}",
+                params={"page": page},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for item in data.get("results", []):
+                if item.get("media_type") == "movie" and item.get("id"):
+                    tmdb_ids.add(str(item["id"]))
+            if page >= data.get("total_pages", 1):
+                break
+            page += 1
+        return tmdb_ids
+
+    async def start_auth(self) -> dict:
+        """Create a v4 request token. Returns the token and its approval URL."""
+        client = await self._get_client()
+        resp = await client.post("https://api.themoviedb.org/4/auth/request_token")
+        resp.raise_for_status()
+        token = resp.json()["request_token"]
+        return {
+            "request_token": token,
+            "verification_url": (
+                f"https://www.themoviedb.org/auth/access?request_token={token}"
+            ),
+        }
+
+    async def complete_auth(self, request_token: str) -> dict | None:
+        """Exchange an approved request token for a user access token."""
+        client = await self._get_client()
+        resp = await client.post(
+            "https://api.themoviedb.org/4/auth/access_token",
+            json={"request_token": request_token},
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        self.user_access_token = data["access_token"]
+        return data
+
+    def _write_headers(self) -> dict:
+        if not self.user_access_token:
+            raise ValueError("TMDb authentication required. Use tmdb_start_auth first.")
+        return {"Authorization": f"Bearer {self.user_access_token}"}
+
+    async def create_list(
+        self, name: str, description: str = "", public: bool = True
+    ) -> dict:
+        """Create a new v4 list on the authenticated user's account."""
+        client = await self._get_client()
+        resp = await client.post(
+            "https://api.themoviedb.org/4/list",
+            json={
+                "name": name,
+                "description": description,
+                "iso_639_1": "en",
+                "public": public,
+            },
+            headers=self._write_headers(),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def add_to_list(self, list_id: str, tmdb_ids: list[str]) -> dict:
+        """Add movies to a v4 list by TMDb IDs."""
+        client = await self._get_client()
+        headers = self._write_headers()
+        added = 0
+        for i in range(0, len(tmdb_ids), 100):
+            batch = tmdb_ids[i : i + 100]
+            resp = await client.post(
+                f"https://api.themoviedb.org/4/list/{list_id}/items",
+                json={
+                    "items": [
+                        {"media_type": "movie", "media_id": int(mid)} for mid in batch
+                    ]
+                },
+                headers=headers,
+            )
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            added += sum(1 for r in results if r.get("success"))
+        return {"added": added, "requested": len(tmdb_ids)}
 
     def is_b_movie_studio(self, companies: list[str]) -> bool:
         """Check if any production company is a known b-movie studio."""

@@ -253,6 +253,48 @@ def _movie_matches_quality_criteria(
     return True
 
 
+async def _collect_top_box_office_tmdb_ids(
+    tmdb: "TMDbService",
+    min_year: int,
+    max_year: int,
+    per_year: int,
+) -> set[str]:
+    """Fetch top box office TMDb IDs across an inclusive year range."""
+    tmdb_ids: set[str] = set()
+    for year in range(min_year, max_year + 1):
+        movies = await tmdb.discover_movies(
+            year_gte=year,
+            year_lte=year,
+            sort_by="revenue.desc",
+            limit=per_year,
+        )
+        tmdb_ids.update(str(m["tmdb_id"]) for m in movies if m.get("tmdb_id"))
+    return tmdb_ids
+
+
+async def _match_emby_movies_by_tmdb_ids(
+    emby: "EmbyService",
+    tmdb_ids: set[str],
+) -> set[str]:
+    """Return Emby movie IDs whose tmdb_id is in the given set."""
+    matching_ids: set[str] = set()
+    if not tmdb_ids:
+        return matching_ids
+    batch_size = 200
+    offset = 0
+    while True:
+        movies, total_count = await emby.get_movies(offset=offset, limit=batch_size)
+        if not movies:
+            break
+        for movie in movies:
+            if movie.tmdb_id and movie.tmdb_id in tmdb_ids:
+                matching_ids.add(movie.id)
+        offset += batch_size
+        if offset >= total_count:
+            break
+    return matching_ids
+
+
 async def sync_collection_by_criteria(
     emby: "EmbyService",
     tmdb: "TMDbService",
@@ -284,21 +326,7 @@ async def sync_collection_by_criteria(
         # Build a lookup of TMDb IDs from the Trakt list
         trakt_tmdb_ids = {str(item.movie.tmdb_id) for item in all_trakt_items if item.movie.tmdb_id}
 
-        # Get all movies from Emby and match by TMDb ID
-        batch_size = 200
-        offset = 0
-        while True:
-            movies, total_count = await emby.get_movies(offset=offset, limit=batch_size)
-            if not movies:
-                break
-
-            for movie in movies:
-                if movie.tmdb_id and movie.tmdb_id in trakt_tmdb_ids:
-                    matching_ids.add(movie.id)
-
-            offset += batch_size
-            if offset >= total_count:
-                break
+        matching_ids = await _match_emby_movies_by_tmdb_ids(emby, trakt_tmdb_ids)
 
         # Calculate and apply changes (add only, never remove)
         to_add = matching_ids - current_ids
@@ -308,6 +336,43 @@ async def sync_collection_by_criteria(
 
         return (
             f"Synced '{collection_name}' from Trakt list: "
+            f"{len(matching_ids)} movies match, "
+            f"+{len(to_add)} added"
+        )
+
+    # Handle TMDb list-based sync
+    tmdb_list_id = criteria.get("tmdb_list_id")
+    if tmdb_list_id:
+        tmdb_list_ids = await tmdb.get_list_movie_ids(str(tmdb_list_id))
+        matching_ids = await _match_emby_movies_by_tmdb_ids(emby, tmdb_list_ids)
+
+        to_add = matching_ids - current_ids
+        if to_add:
+            await emby.add_to_collection(collection_id, list(to_add))
+
+        return (
+            f"Synced '{collection_name}' from TMDb list: "
+            f"{len(matching_ids)} movies match, "
+            f"+{len(to_add)} added"
+        )
+
+    # Handle top-box-office-by-year-range sync
+    bo_min_year = criteria.get("top_box_office_min_year")
+    bo_max_year = criteria.get("top_box_office_max_year")
+    bo_per_year = criteria.get("top_box_office_per_year", 10)
+    if bo_min_year and bo_max_year:
+        box_office_tmdb_ids = await _collect_top_box_office_tmdb_ids(
+            tmdb, bo_min_year, bo_max_year, bo_per_year
+        )
+        matching_ids = await _match_emby_movies_by_tmdb_ids(emby, box_office_tmdb_ids)
+
+        to_add = matching_ids - current_ids
+        if to_add:
+            await emby.add_to_collection(collection_id, list(to_add))
+
+        return (
+            f"Synced '{collection_name}' from top box office "
+            f"({bo_min_year}-{bo_max_year}, top {bo_per_year}/year): "
             f"{len(matching_ids)} movies match, "
             f"+{len(to_add)} added"
         )
@@ -470,6 +535,7 @@ def create_mcp_server() -> Server:
     tmdb = TMDbService(
         api_key=settings.tmdb_api_key,
         read_access_token=settings.tmdb_read_access_token,
+        user_access_token=settings.tmdb_user_access_token,
     )
     tastedive = TasteDiveService(
         api_key=settings.tastedive_api_key,
@@ -805,6 +871,22 @@ def create_mcp_server() -> Server:
                             "type": "string",
                             "description": "Trakt list slug for list-based sync",
                         },
+                        "tmdb_list_id": {
+                            "type": "string",
+                            "description": "TMDb list ID for list-based sync (public v4 list)",
+                        },
+                        "top_box_office_min_year": {
+                            "type": "integer",
+                            "description": "Inclusive start year for top-box-office sync (uses TMDb revenue.desc)",
+                        },
+                        "top_box_office_max_year": {
+                            "type": "integer",
+                            "description": "Inclusive end year for top-box-office sync",
+                        },
+                        "top_box_office_per_year": {
+                            "type": "integer",
+                            "description": "Top N movies per year by revenue (default 10)",
+                        },
                         "description": {
                             "type": "string",
                             "description": "Human-readable description of the collection criteria",
@@ -1082,6 +1164,70 @@ def create_mcp_server() -> Server:
                         },
                     },
                     "required": ["username", "list_slug", "imdb_ids"],
+                },
+            ),
+            # TMDb write tools
+            Tool(
+                name="tmdb_start_auth",
+                description="Start TMDb v4 user authentication. Returns a URL for the user to approve access.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="tmdb_complete_auth",
+                description="Complete TMDb authentication after the user has approved the request token.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "request_token": {
+                            "type": "string",
+                            "description": "Request token from tmdb_start_auth",
+                        },
+                    },
+                    "required": ["request_token"],
+                },
+            ),
+            Tool(
+                name="create_tmdb_list",
+                description="Create a new list on the authenticated TMDb user's account. Returns the list ID.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "List name",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "List description",
+                        },
+                        "public": {
+                            "type": "boolean",
+                            "description": "Whether the list is public (default: true)",
+                        },
+                    },
+                    "required": ["name"],
+                },
+            ),
+            Tool(
+                name="add_to_tmdb_list",
+                description="Add movies to a TMDb list by TMDb IDs.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "list_id": {
+                            "type": "string",
+                            "description": "TMDb list ID",
+                        },
+                        "tmdb_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of TMDb movie IDs (e.g., ['2440', '4689'])",
+                        },
+                    },
+                    "required": ["list_id", "tmdb_ids"],
                 },
             ),
             # Artwork generation tools
@@ -1794,6 +1940,63 @@ def create_mcp_server() -> Server:
                 list_slug = arguments["list_slug"]
                 imdb_ids = arguments["imdb_ids"]
                 result = await trakt.add_items_to_list(username, list_slug, imdb_ids)
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2),
+                    )
+                ]
+
+            elif name == "tmdb_start_auth":
+                data = await tmdb.start_auth()
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(data, indent=2),
+                    )
+                ]
+
+            elif name == "tmdb_complete_auth":
+                request_token = arguments["request_token"]
+                token_data = await tmdb.complete_auth(request_token)
+                if token_data:
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": True,
+                                "access_token": token_data["access_token"],
+                                "message": "Add this as TMDB_USER_ACCESS_TOKEN in Doppler, then restart the MCP server.",
+                            }, indent=2),
+                        )
+                    ]
+                return [
+                    TextContent(
+                        type="text",
+                        text="Authentication failed. Approve the request token first, then retry.",
+                    )
+                ]
+
+            elif name == "create_tmdb_list":
+                list_name = arguments["name"]
+                description = arguments.get("description", "")
+                public = arguments.get("public", True)
+                data = await tmdb.create_list(list_name, description, public)
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "id": data.get("id"),
+                            "name": list_name,
+                            "success": data.get("success"),
+                        }, indent=2),
+                    )
+                ]
+
+            elif name == "add_to_tmdb_list":
+                list_id = arguments["list_id"]
+                tmdb_ids = arguments["tmdb_ids"]
+                result = await tmdb.add_to_list(list_id, tmdb_ids)
                 return [
                     TextContent(
                         type="text",
