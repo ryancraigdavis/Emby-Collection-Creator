@@ -11,6 +11,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from ..config import get_settings
+from ..lists import parse_list_file, resolve_entries
 from ..services.comfyui import ComfyUIService
 from ..services.emby import EmbyService
 from ..services.tmdb import TMDbService
@@ -1230,6 +1231,40 @@ def create_mcp_server() -> Server:
                     "required": ["list_id", "tmdb_ids"],
                 },
             ),
+            Tool(
+                name="create_tmdb_list_from_file",
+                description=(
+                    "Create a TMDb list from a research list file containing IMDb IDs "
+                    "(e.g. a markdown table). Resolves IMDb IDs to TMDb, reports "
+                    "unresolved IDs and year mismatches, and populates the list."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the list file (e.g. lists/video_game_movies.md)",
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Name for the new TMDb list",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "List description",
+                        },
+                        "public": {
+                            "type": "boolean",
+                            "description": "Whether the list is public (default: true)",
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "Resolve and report only, without creating the list (default: false)",
+                        },
+                    },
+                    "required": ["file_path", "name"],
+                },
+            ),
             # Artwork generation tools
             Tool(
                 name="generate_collection_poster",
@@ -2001,6 +2036,60 @@ def create_mcp_server() -> Server:
                     TextContent(
                         type="text",
                         text=json.dumps(result, indent=2),
+                    )
+                ]
+
+            elif name == "create_tmdb_list_from_file":
+                file_path = Path(arguments["file_path"])
+                if not file_path.exists():
+                    return [
+                        TextContent(
+                            type="text", text=f"File not found: {file_path}"
+                        )
+                    ]
+
+                entries = parse_list_file(file_path.read_text())
+                if not entries:
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"No IMDb IDs found in {file_path}",
+                        )
+                    ]
+
+                report = await resolve_entries(tmdb, entries)
+                resolved_ids = [r["tmdb_id"] for r in report["resolved"]]
+
+                summary = {
+                    "parsed": len(entries),
+                    "resolved": len(resolved_ids),
+                    "unresolved": report["unresolved"],
+                    "mismatched": report["mismatched"],
+                }
+
+                if arguments.get("dry_run", False):
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps({"dry_run": True, **summary}, indent=2),
+                        )
+                    ]
+
+                created = await tmdb.create_list(
+                    arguments["name"],
+                    arguments.get("description", ""),
+                    arguments.get("public", True),
+                )
+                list_id = str(created.get("id"))
+                added = await tmdb.add_to_list(list_id, resolved_ids)
+
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {"list_id": list_id, "added": added["added"], **summary},
+                            indent=2,
+                        ),
                     )
                 ]
 

@@ -179,6 +179,17 @@ class TMDbService:
             page += 1
         return tmdb_ids
 
+    async def find_by_imdb_id(self, imdb_id: str) -> dict | None:
+        """Resolve an IMDb ID to a TMDb movie record."""
+        client = await self._get_client()
+        resp = await client.get(
+            f"/find/{imdb_id}", params={"external_source": "imdb_id"}
+        )
+        if resp.status_code != 200:
+            return None
+        results = resp.json().get("movie_results", [])
+        return results[0] if results else None
+
     async def start_auth(self) -> dict:
         """Create a v4 request token. Returns the token and its approval URL."""
         client = await self._get_client()
