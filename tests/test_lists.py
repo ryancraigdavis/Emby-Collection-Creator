@@ -137,10 +137,70 @@ async def test_year_mismatch_tolerance(
 ):
     mock_tmdb.find_by_imdb_id.return_value = {
         "id": 1,
-        "title": "X",
+        "title": "Mortal Kombat",
         "release_date": release_date,
     }
 
-    report = await resolve_entries(mock_tmdb, [ListEntry("tt1111111", "X", entry_year)])
+    report = await resolve_entries(
+        mock_tmdb, [ListEntry("tt1111111", "Mortal Kombat", entry_year)]
+    )
 
     assert bool(report["mismatched"]) is is_flagged
+
+
+async def test_title_mismatch_same_year_wrong_film(mock_tmdb):
+    # The blind spot: a wrong ID whose film shares the right decade passes the
+    # year check but its title shares no words with the row -> must be flagged.
+    mock_tmdb.find_by_imdb_id.return_value = {
+        "id": 7,
+        "title": "Hamburger Hill",
+        "original_title": "Hamburger Hill",
+        "release_date": "1987-01-01",
+    }
+    entry = ListEntry(
+        "tt0092820",
+        "Delirium",
+        1987,
+        row_text="| 116 | Delirium | 1987 | | Le foto di Gioia; Lamberto Bava |",
+    )
+
+    report = await resolve_entries(mock_tmdb, [entry])
+
+    assert len(report["mismatched"]) == 1
+    assert report["mismatched"][0]["reason"] == "title"
+    assert report["mismatched"][0]["tmdb_says"] == "Hamburger Hill (1987)"
+
+
+async def test_title_match_via_original_title(mock_tmdb):
+    # Row lists the English title; TMDb localized title differs but the Italian
+    # original_title appears in the row's notes -> not a mismatch.
+    mock_tmdb.find_by_imdb_id.return_value = {
+        "id": 8,
+        "title": "Deep Red",
+        "original_title": "Profondo rosso",
+        "release_date": "1975-01-01",
+    }
+    entry = ListEntry(
+        "tt0073582",
+        "Deep Red",
+        1975,
+        row_text="| 84 | Deep Red | 1975 | | Profondo rosso; Dario Argento |",
+    )
+
+    report = await resolve_entries(mock_tmdb, [entry])
+
+    assert report["mismatched"] == []
+
+
+async def test_title_and_year_both_flagged(mock_tmdb):
+    mock_tmdb.find_by_imdb_id.return_value = {
+        "id": 9,
+        "title": "Ammonite",
+        "original_title": "Ammonite",
+        "release_date": "2020-01-01",
+    }
+    entry = ListEntry("tt7983894", "In Fabric", 2018, row_text="In Fabric 2018")
+
+    report = await resolve_entries(mock_tmdb, [entry])
+
+    assert report["mismatched"][0]["reason"] == "year+title"

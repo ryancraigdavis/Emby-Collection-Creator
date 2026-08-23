@@ -1261,6 +1261,10 @@ def create_mcp_server() -> Server:
                             "type": "boolean",
                             "description": "Resolve and report only, without creating the list (default: false)",
                         },
+                        "include_flagged": {
+                            "type": "boolean",
+                            "description": "Import entries flagged as year/title mismatches too (default: false, which excludes them)",
+                        },
                     },
                     "required": ["file_path", "name"],
                 },
@@ -2058,11 +2062,20 @@ def create_mcp_server() -> Server:
                     ]
 
                 report = await resolve_entries(tmdb, entries)
-                resolved_ids = [r["tmdb_id"] for r in report["resolved"]]
+                include_flagged = arguments.get("include_flagged", False)
+                flagged_ids = {m["imdb_id"] for m in report["mismatched"]}
+                importable = [
+                    r
+                    for r in report["resolved"]
+                    if include_flagged or r["imdb_id"] not in flagged_ids
+                ]
+                import_ids = [r["tmdb_id"] for r in importable]
 
                 summary = {
                     "parsed": len(entries),
-                    "resolved": len(resolved_ids),
+                    "resolved": len(report["resolved"]),
+                    "importable": len(import_ids),
+                    "excluded_mismatched": 0 if include_flagged else len(flagged_ids),
                     "unresolved": report["unresolved"],
                     "mismatched": report["mismatched"],
                 }
@@ -2081,7 +2094,7 @@ def create_mcp_server() -> Server:
                     arguments.get("public", True),
                 )
                 list_id = str(created.get("id"))
-                added = await tmdb.add_to_list(list_id, resolved_ids)
+                added = await tmdb.add_to_list(list_id, import_ids)
 
                 return [
                     TextContent(

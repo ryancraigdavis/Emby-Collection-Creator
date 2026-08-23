@@ -1,9 +1,15 @@
-"""Configuration management using Doppler or environment variables."""
+"""Configuration management from a local .env file or environment variables."""
 
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from attrs import define
+from dotenv import load_dotenv
+
+# Load secrets from the repo-root .env, which is authoritative — its values
+# override anything already in the environment (e.g. a stale MCP env block).
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
 
 @define
