@@ -46,7 +46,7 @@ claude mcp add --transport stdio emby-collection-creator \
   -- doppler run -- uv run python -m emby_collection_creator.mcp.server
 ```
 
-Or without Doppler (using `.env`):
+Using `.env`:
 
 ```bash
 claude mcp add --transport stdio emby-collection-creator \
