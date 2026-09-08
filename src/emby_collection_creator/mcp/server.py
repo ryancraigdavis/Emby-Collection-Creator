@@ -1717,9 +1717,15 @@ def create_mcp_server() -> Server:
                 for collection in collections:
                     criteria = decode_criteria(collection.overview)
                     if criteria:
-                        result = await sync_collection_by_criteria(
-                            emby, tmdb, collection.id, collection.name, criteria, trakt
-                        )
+                        try:
+                            result = await sync_collection_by_criteria(
+                                emby, tmdb, collection.id, collection.name, criteria, trakt
+                            )
+                        except Exception as e:
+                            result = (
+                                f"Failed '{collection.name}': "
+                                f"{type(e).__name__}: {e}"
+                            )
                         results.append(result)
 
                 if not results:
