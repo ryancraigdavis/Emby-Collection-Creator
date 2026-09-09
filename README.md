@@ -22,7 +22,7 @@ MCP server for AI-powered movie collection management in Emby. Use natural langu
 
 ### Environment Variables
 
-Set these in Doppler or a `.env` file:
+Use an `.env` file:
 
 ```
 EMBY_SERVER_URL=http://your-emby-server:8096
