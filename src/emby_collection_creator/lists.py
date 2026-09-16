@@ -48,7 +48,8 @@ def parse_list_file(text: str) -> list[ListEntry]:
 
 
 def _pick_year(cells: list[str]) -> int | None:
-    for cell in cells:
+    candidates = cells[1:] if len(cells) >= 4 and cells[0].isdigit() else cells
+    for cell in candidates:
         if YEAR_RE.match(cell):
             return int(cell)
     return None

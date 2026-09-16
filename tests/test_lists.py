@@ -204,3 +204,10 @@ async def test_title_and_year_both_flagged(mock_tmdb):
     report = await resolve_entries(mock_tmdb, [entry])
 
     assert report["mismatched"][0]["reason"] == "year+title"
+
+
+def test_row_number_is_not_mistaken_for_year():
+    from emby_collection_creator.lists import parse_list_file
+
+    text = "| # | Movie Title | Year | IMDb ID |\n|---|---|---|---|\n| 1991 | Slacker | 1990 | tt0102943 |\n"
+    assert parse_list_file(text)[0].year == 1990
